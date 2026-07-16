@@ -170,6 +170,26 @@
   .manage-row .meta { color: var(--text-muted); font-size: 0.8rem; white-space: nowrap; }
   .manage-row button.danger { color: var(--danger); }
 
+  /* Sync / auth */
+  .pill { display: inline-flex; align-items: center; gap: 6px; font-size: 0.82rem; border-radius: 999px; padding: 6px 12px; max-width: 240px; }
+  .pill[hidden] { display: none; }
+  .pill #sync-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted); flex: none; }
+  .status-dot.ok { background: var(--good); }
+  .status-dot.err { background: var(--danger); }
+  .status-dot.busy { background: var(--c4); }
+  .auth-form { display: flex; flex-direction: column; gap: 8px; max-width: 380px; }
+  .auth-form input {
+    font: inherit; padding: 8px 12px; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--surface-1); color: var(--text-primary);
+  }
+  .auth-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  .auth-msg { font-size: 0.82rem; color: var(--text-secondary); min-height: 1.2em; }
+  .auth-msg.error { color: var(--danger); }
+  .account-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 0.9rem; }
+  .account-row .email { font-weight: 600; overflow-wrap: anywhere; }
+  .account-row .meta { color: var(--text-muted); font-size: 0.8rem; }
+
   /* Tooltip */
   #tooltip {
     position: fixed; pointer-events: none; z-index: 10; display: none;
@@ -186,12 +206,20 @@
   <header>
     <h1>Habit Tracker</h1>
     <div class="header-actions">
+      <button class="pill" id="sync-pill" hidden aria-haspopup="true" aria-expanded="false">
+        <span class="status-dot" id="sync-dot"></span><span id="sync-label">Sign in to sync</span>
+      </button>
       <button class="icon-btn" id="theme-toggle" title="Toggle theme" aria-label="Toggle theme">◐</button>
     </div>
   </header>
   <div class="today-label" id="today-label"></div>
 
   <div class="tiles" id="tiles"></div>
+
+  <section id="auth-section" hidden>
+    <h2>Sync across devices</h2>
+    <div class="card" id="auth-card"></div>
+  </section>
 
   <section>
     <h2>Today</h2>
@@ -265,6 +293,7 @@
 </div>
 <div id="tooltip" role="tooltip"></div>
 
+<script src="supabase-config.js"></script>
 <script>
 (() => {
   'use strict';
@@ -288,18 +317,64 @@
     }
   })();
 
+  // Sync metadata lives beside the data but never changes the {habits, checks}
+  // shape, so exports from any version stay importable in any other.
+  function ensureMeta(data) {
+    const m = data.meta || {};
+    m.habitTs = m.habitTs || {};        // habitId -> last local edit (ms)
+    m.checkTs = m.checkTs || {};        // habitId -> { day -> last local edit (ms) }
+    m.habitDeleted = m.habitDeleted || {}; // habitId -> deletion time (tombstone)
+    m.dirty = m.dirty || {};
+    m.dirty.habits = m.dirty.habits || {};   // habitId -> true (needs push)
+    m.dirty.checks = m.dirty.checks || {};   // "habitId|day" -> true
+    data.meta = m;
+    return data;
+  }
   function load() {
     try {
       const raw = store.getItem(STORE_KEY);
       if (raw) {
         const data = JSON.parse(raw);
-        if (data && Array.isArray(data.habits) && typeof data.checks === 'object') return data;
+        if (data && Array.isArray(data.habits) && typeof data.checks === 'object') return ensureMeta(data);
       }
     } catch (e) { /* corrupted store falls through to fresh state */ }
-    return { habits: [], checks: {} };
+    return ensureMeta({ habits: [], checks: {} });
   }
   let state = load();
-  function save() { try { store.setItem(STORE_KEY, JSON.stringify(state)); } catch (e) { /* quota/blocked: keep in-memory state */ } }
+  function save() {
+    try { store.setItem(STORE_KEY, JSON.stringify(state)); } catch (e) { /* quota/blocked: keep in-memory state */ }
+    scheduleSync();
+  }
+
+  function markHabitDirty(id) {
+    state.meta.habitTs[id] = Date.now();
+    delete state.meta.habitDeleted[id];
+    state.meta.dirty.habits[id] = true;
+  }
+  function markHabitDeleted(id) {
+    delete state.meta.habitTs[id];
+    delete state.meta.checkTs[id];
+    state.meta.habitDeleted[id] = Date.now();
+    state.meta.dirty.habits[id] = true;
+  }
+  function markCheckDirty(habitId, day) {
+    (state.meta.checkTs[habitId] = state.meta.checkTs[habitId] || {})[day] = Date.now();
+    state.meta.dirty.checks[habitId + '|' + day] = true;
+  }
+  function markAllDirty() {
+    const m = state.meta;
+    for (const h of state.habits) {
+      if (!m.habitTs[h.id]) m.habitTs[h.id] = Date.now();
+      m.dirty.habits[h.id] = true;
+    }
+    for (const hid in state.checks) {
+      const t = (m.checkTs[hid] = m.checkTs[hid] || {});
+      for (const day in state.checks[hid]) {
+        if (!t[day]) t[day] = Date.now();
+        m.dirty.checks[hid + '|' + day] = true;
+      }
+    }
+  }
 
   // ---------- dates ----------
   const DAY_MS = 86400000;
@@ -317,6 +392,7 @@
   function setChecked(habitId, key, on) {
     if (!state.checks[habitId]) state.checks[habitId] = {};
     if (on) state.checks[habitId][key] = true; else delete state.checks[habitId][key];
+    markCheckDirty(habitId, key);
     save();
   }
   function habitStart(h) {
@@ -569,7 +645,7 @@
       rename.textContent = 'Rename';
       rename.addEventListener('click', () => {
         const name = prompt('Rename habit:', h.name);
-        if (name && name.trim()) { h.name = name.trim().slice(0, 60); save(); render(); }
+        if (name && name.trim()) { h.name = name.trim().slice(0, 60); markHabitDirty(h.id); save(); render(); }
       });
       const del = document.createElement('button');
       del.className = 'danger';
@@ -578,6 +654,7 @@
         if (confirm(`Delete "${h.name}" and all its history?`)) {
           state.habits = state.habits.filter(x => x.id !== h.id);
           delete state.checks[h.id];
+          markHabitDeleted(h.id);
           save(); render();
         }
       });
@@ -597,13 +674,15 @@
     const input = document.getElementById('new-name');
     const name = input.value.trim();
     if (!name) return;
-    state.habits.push({
+    const habit = {
       id: 'h' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
       name: name.slice(0, 60),
       color: COLORS[state.habits.length % COLORS.length],
       target: parseInt(document.getElementById('new-target').value, 10),
       createdAt: dkey(today()),
-    });
+    };
+    state.habits.push(habit);
+    markHabitDirty(habit.id);
     input.value = '';
     save(); render();
   });
@@ -626,7 +705,8 @@
     file.text().then(text => {
       const data = JSON.parse(text);
       if (!data || !Array.isArray(data.habits) || typeof data.checks !== 'object') throw new Error('bad shape');
-      state = data;
+      state = ensureMeta(data);
+      markAllDirty();
       save(); render();
     }).catch(() => alert('Could not import: not a valid Habit Tracker export.'));
     e.target.value = '';
@@ -644,8 +724,273 @@
     try { store.setItem(THEME_KEY, next); } catch (e) { /* non-fatal */ }
   });
 
+  // ---------- cloud sync (Supabase, optional) ----------
+  // Local-first: every mutation lands in localStorage immediately and is
+  // flagged in an outbox (meta.dirty). When configured + signed in, the
+  // outbox is pushed and remote changes are pulled with a per-record
+  // last-write-wins rule (applyRemoteHabit / applyRemoteCheck are the only
+  // merge points — swap those two to change the strategy).
+  const CFG = window.HABIT_SUPABASE;
+  const SYNC_CURSOR_PREFIX = 'habit-tracker-cursor:';
+  let sb = null, sbUser = null, syncTimer = null, syncBusy = false, rtChannel = null, sbLoadFailed = false;
+  let lastSyncedAt = null;
+
+  const syncPill = document.getElementById('sync-pill');
+  const syncDot = document.getElementById('sync-dot');
+  const syncLabel = document.getElementById('sync-label');
+  const authSection = document.getElementById('auth-section');
+  const authCard = document.getElementById('auth-card');
+
+  function setSyncStatus(kind, text) {
+    syncDot.className = 'status-dot' + (kind === 'ok' ? ' ok' : kind === 'err' ? ' err' : kind === 'busy' ? ' busy' : '');
+    syncLabel.textContent = text;
+    syncPill.title = lastSyncedAt ? 'Last synced ' + new Date(lastSyncedAt).toLocaleTimeString() : text;
+  }
+
+  function scheduleSync() {
+    if (!sb || !sbUser) return;
+    clearTimeout(syncTimer);
+    syncTimer = setTimeout(() => { syncNow().catch(() => {}); }, 800);
+  }
+
+  async function syncNow() {
+    if (!sb || !sbUser || syncBusy) return;
+    syncBusy = true;
+    setSyncStatus('busy', 'Syncing…');
+    try {
+      await flushOutbox();
+      await pullChanges();
+      lastSyncedAt = Date.now();
+      setSyncStatus('ok', shortEmail(sbUser.email));
+    } catch (e) {
+      setSyncStatus('err', navigator.onLine === false ? 'Offline — saved locally' : 'Sync error — will retry');
+    } finally {
+      syncBusy = false;
+      // mutations made while a sync was in flight stay dirty; catch them
+      if (Object.keys(state.meta.dirty.habits).length || Object.keys(state.meta.dirty.checks).length) scheduleSync();
+    }
+  }
+
+  async function flushOutbox() {
+    const m = state.meta;
+    const habitIds = Object.keys(m.dirty.habits);
+    const checkKeys = Object.keys(m.dirty.checks);
+    const pushedTs = {};
+    if (habitIds.length) {
+      const rows = habitIds.map(id => {
+        const h = state.habits.find(x => x.id === id);
+        const ts = (h ? m.habitTs[id] : m.habitDeleted[id]) || Date.now();
+        pushedTs[id] = ts;
+        return h
+          ? { user_id: sbUser.id, id, name: h.name, color: h.color, target: h.target, created_day: h.createdAt, deleted: false, updated_ms: ts }
+          : { user_id: sbUser.id, id, name: '', color: 'c1', target: 7, created_day: '', deleted: true, updated_ms: ts };
+      });
+      const { error } = await sb.from('habits').upsert(rows);
+      if (error) throw error;
+      for (const id of habitIds) {
+        const cur = state.habits.some(x => x.id === id) ? m.habitTs[id] : m.habitDeleted[id];
+        if (cur === pushedTs[id]) delete m.dirty.habits[id]; // untouched during the await
+      }
+    }
+    if (checkKeys.length) {
+      const rows = checkKeys.map(k => {
+        const sep = k.indexOf('|');
+        const habitId = k.slice(0, sep), day = k.slice(sep + 1);
+        const ts = (m.checkTs[habitId] && m.checkTs[habitId][day]) || Date.now();
+        pushedTs[k] = ts;
+        return { user_id: sbUser.id, habit_id: habitId, day, done: isChecked(habitId, day), updated_ms: ts };
+      });
+      const { error } = await sb.from('checks').upsert(rows);
+      if (error) throw error;
+      for (const k of checkKeys) {
+        const sep = k.indexOf('|');
+        const cur = state.meta.checkTs[k.slice(0, sep)] && state.meta.checkTs[k.slice(0, sep)][k.slice(sep + 1)];
+        if (cur === pushedTs[k] || cur === undefined) delete m.dirty.checks[k];
+      }
+    }
+    save();
+  }
+
+  function applyRemoteHabit(r) {
+    const m = state.meta;
+    const localTs = Math.max(m.habitTs[r.id] || 0, m.habitDeleted[r.id] || 0);
+    if (r.updated_ms <= localTs) return false;
+    delete m.dirty.habits[r.id]; // remote is newer: it wins
+    if (r.deleted) {
+      const existed = state.habits.some(h => h.id === r.id) || !!state.checks[r.id];
+      state.habits = state.habits.filter(h => h.id !== r.id);
+      delete state.checks[r.id];
+      delete m.habitTs[r.id];
+      delete m.checkTs[r.id];
+      m.habitDeleted[r.id] = r.updated_ms;
+      return existed;
+    }
+    let h = state.habits.find(x => x.id === r.id);
+    if (!h) { h = { id: r.id }; state.habits.push(h); }
+    h.name = r.name; h.color = r.color; h.target = r.target; h.createdAt = r.created_day;
+    m.habitTs[r.id] = r.updated_ms;
+    delete m.habitDeleted[r.id];
+    return true;
+  }
+
+  function applyRemoteCheck(r) {
+    const m = state.meta;
+    if (m.habitDeleted[r.habit_id] && m.habitDeleted[r.habit_id] >= r.updated_ms) return false;
+    const localTs = (m.checkTs[r.habit_id] && m.checkTs[r.habit_id][r.day]) || 0;
+    if (r.updated_ms <= localTs) return false;
+    delete m.dirty.checks[r.habit_id + '|' + r.day];
+    (m.checkTs[r.habit_id] = m.checkTs[r.habit_id] || {})[r.day] = r.updated_ms;
+    const had = isChecked(r.habit_id, r.day);
+    if (r.done) {
+      (state.checks[r.habit_id] = state.checks[r.habit_id] || {})[r.day] = true;
+    } else if (state.checks[r.habit_id]) {
+      delete state.checks[r.habit_id][r.day];
+    }
+    return had !== r.done;
+  }
+
+  async function pullChanges() {
+    const cursorKey = SYNC_CURSOR_PREFIX + sbUser.id;
+    let cursor = Number(store.getItem(cursorKey) || 0);
+    const [hs, cs] = await Promise.all([
+      sb.from('habits').select('*').gt('updated_ms', cursor),
+      sb.from('checks').select('*').gt('updated_ms', cursor),
+    ]);
+    if (hs.error) throw hs.error;
+    if (cs.error) throw cs.error;
+    let changed = false;
+    for (const r of hs.data || []) { if (applyRemoteHabit(r)) changed = true; cursor = Math.max(cursor, r.updated_ms); }
+    for (const r of cs.data || []) { if (applyRemoteCheck(r)) changed = true; cursor = Math.max(cursor, r.updated_ms); }
+    try { store.setItem(cursorKey, String(cursor)); } catch (e) { /* non-fatal */ }
+    if (changed) { save(); render(); }
+  }
+
+  function startRealtime() {
+    stopRealtime();
+    rtChannel = sb.channel('habit-sync')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'habits', filter: 'user_id=eq.' + sbUser.id },
+        p => { if (p.new && p.new.id && applyRemoteHabit(p.new)) { save(); render(); } })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'checks', filter: 'user_id=eq.' + sbUser.id },
+        p => { if (p.new && p.new.habit_id && applyRemoteCheck(p.new)) { save(); render(); } })
+      .subscribe();
+  }
+  function stopRealtime() {
+    if (rtChannel) { sb.removeChannel(rtChannel); rtChannel = null; }
+  }
+
+  function shortEmail(email) {
+    return email && email.length > 22 ? email.slice(0, 20) + '…' : (email || 'Account');
+  }
+
+  function authMsg(text, isError) {
+    const el = document.getElementById('auth-msg');
+    if (el) { el.textContent = text; el.classList.toggle('error', !!isError); }
+  }
+
+  function renderAuthPanel() {
+    syncPill.setAttribute('aria-expanded', String(!authSection.hidden));
+    if (!sb) {
+      authCard.innerHTML = '<div class="auth-msg' + (sbLoadFailed ? ' error' : '') + '">' +
+        (sbLoadFailed
+          ? 'Could not load the sync client — check your connection and reload. Your data is safe on this device.'
+          : 'Loading sync client…') + '</div>';
+      return;
+    }
+    if (sbUser) {
+      authCard.innerHTML =
+        '<div class="account-row">' +
+        '<span class="email">' + esc(sbUser.email || '') + '</span>' +
+        '<span class="meta" id="auth-meta"></span>' +
+        '<button id="sync-now-btn">Sync now</button>' +
+        '<button id="sign-out-btn">Sign out</button>' +
+        '</div><div class="auth-msg" id="auth-msg"></div>';
+      document.getElementById('auth-meta').textContent =
+        lastSyncedAt ? 'last synced ' + new Date(lastSyncedAt).toLocaleTimeString() : '';
+      document.getElementById('sync-now-btn').addEventListener('click', () => syncNow().catch(() => {}));
+      document.getElementById('sign-out-btn').addEventListener('click', async () => {
+        await sb.auth.signOut();
+        authMsg('Signed out. Your data stays on this device.');
+      });
+    } else {
+      authCard.innerHTML =
+        '<form class="auth-form" id="auth-form">' +
+        '<p style="font-size:0.9rem;color:var(--text-secondary)">Sign in to back up your habits and use them on any device. Without an account everything keeps working on this device only.</p>' +
+        '<input type="email" id="auth-email" placeholder="Email" autocomplete="email" required>' +
+        '<input type="password" id="auth-password" placeholder="Password" autocomplete="current-password" minlength="6">' +
+        '<div class="auth-actions">' +
+        '<button type="submit" class="primary">Sign in</button>' +
+        '<button type="button" id="auth-signup">Create account</button>' +
+        '<button type="button" id="auth-magic">Email me a magic link</button>' +
+        '</div>' +
+        '<div class="auth-msg" id="auth-msg"></div>' +
+        '</form>';
+      const email = () => document.getElementById('auth-email').value.trim();
+      const password = () => document.getElementById('auth-password').value;
+      document.getElementById('auth-form').addEventListener('submit', async e => {
+        e.preventDefault();
+        if (!password()) { authMsg('Enter your password, or use the magic link instead.', true); return; }
+        const { error } = await sb.auth.signInWithPassword({ email: email(), password: password() });
+        if (error) authMsg(error.message, true);
+      });
+      document.getElementById('auth-signup').addEventListener('click', async () => {
+        if (!email() || !password()) { authMsg('Enter an email and a password (6+ characters) to create an account.', true); return; }
+        const { error } = await sb.auth.signUp({ email: email(), password: password() });
+        if (error) authMsg(error.message, true);
+        else authMsg('Account created — check your email if a confirmation link is required, then sign in.');
+      });
+      document.getElementById('auth-magic').addEventListener('click', async () => {
+        if (!email()) { authMsg('Enter your email first.', true); return; }
+        const opts = location.protocol.startsWith('http') ? { emailRedirectTo: location.href } : {};
+        const { error } = await sb.auth.signInWithOtp({ email: email(), options: opts });
+        if (error) authMsg(error.message, true);
+        else authMsg('Magic link sent — open it on this device to sign in.');
+      });
+    }
+  }
+
+  async function startSyncSession() {
+    const cursorKey = SYNC_CURSOR_PREFIX + sbUser.id;
+    if (store.getItem(cursorKey) === null) markAllDirty(); // first sign-in here: migrate local data up
+    await syncNow();
+    startRealtime();
+  }
+
+  async function initSync() {
+    if (!CFG || !CFG.url || !CFG.anonKey) return; // not configured: pure local mode, UI unchanged
+    syncPill.hidden = false;
+    setSyncStatus('idle', 'Sign in to sync');
+    syncPill.addEventListener('click', () => {
+      authSection.hidden = !authSection.hidden;
+      if (!authSection.hidden) { renderAuthPanel(); authSection.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
+      syncPill.setAttribute('aria-expanded', String(!authSection.hidden));
+    });
+    let mod;
+    try {
+      mod = await import(CFG.clientUrl || 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm');
+    } catch (e) {
+      sbLoadFailed = true;
+      setSyncStatus('err', 'Sync unavailable (offline?)');
+      if (!authSection.hidden) renderAuthPanel();
+      return;
+    }
+    sb = mod.createClient(CFG.url, CFG.anonKey);
+    if (!authSection.hidden) renderAuthPanel();
+    sb.auth.onAuthStateChange((_event, session) => {
+      const wasUser = sbUser && sbUser.id;
+      sbUser = session ? session.user : null;
+      renderAuthPanel();
+      if (sbUser && sbUser.id !== wasUser) startSyncSession().catch(() => {});
+      if (!sbUser) { stopRealtime(); setSyncStatus('idle', 'Sign in to sync'); }
+    });
+    window.addEventListener('online', () => { if (sbUser) syncNow().catch(() => {}); });
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden && sbUser) syncNow().catch(() => {});
+    });
+  }
+
   document.getElementById('today-label').textContent = fmtDay.format(today());
   render();
+  initSync();
 
   // re-render at midnight so "today" rolls over in long-lived tabs
   setTimeout(() => location.reload(), addDays(today(), 1) - Date.now() + 1000);
