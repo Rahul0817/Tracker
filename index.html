@@ -200,6 +200,15 @@
   footer { color: var(--text-muted); font-size: 0.78rem; margin-top: 40px; display: flex; gap: 12px; flex-wrap: wrap; }
   footer button { font-size: 0.78rem; padding: 4px 10px; }
 </style>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#f9f9f7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0d0d0d" media="(prefers-color-scheme: dark)">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Habits">
 </head>
 <body>
 <div class="wrap">
@@ -986,6 +995,11 @@
     document.addEventListener('visibilitychange', () => {
       if (!document.hidden && sbUser) syncNow().catch(() => {});
     });
+  }
+
+  // ---------- PWA: offline app shell ----------
+  if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
+    navigator.serviceWorker.register('sw.js').catch(() => { /* shell caching unavailable; the app still works */ });
   }
 
   document.getElementById('today-label').textContent = fmtDay.format(today());
