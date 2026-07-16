@@ -15,6 +15,13 @@ modern browser — no build step, no server, no dependencies.
 - **Backfill-aware stats** — checking off days before a habit was created
   extends its history, so imported or retroactive data counts.
 - **Light & dark themes** — follows the OS setting, with a manual toggle.
+- **Installable (PWA)** — add to home screen on Android/iOS; the app shell
+  works offline after the first visit (requires serving over HTTPS).
+- **Daily reminders** — optional notification at a time you pick if habits
+  are still unchecked. Fires only while the app is open in a tab or running
+  as an installed app; there is no push server, so a fully closed app cannot
+  be notified. (True push would need a service-worker push subscription plus
+  a backend endpoint — flagged as future work.)
 - **Local & portable data** — everything is stored in `localStorage`;
   export/import as JSON from the footer.
 

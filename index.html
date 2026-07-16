@@ -190,6 +190,15 @@
   .account-row .email { font-weight: 600; overflow-wrap: anywhere; }
   .account-row .meta { color: var(--text-muted); font-size: 0.8rem; }
 
+  /* Reminders */
+  .reminder-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .reminder-toggle { display: inline-flex; align-items: center; gap: 8px; font-weight: 500; cursor: pointer; }
+  .reminder-row input[type="time"] {
+    font: inherit; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--surface-1); color: var(--text-primary);
+  }
+  .hint { font-size: 0.8rem; color: var(--text-muted); margin-top: 8px; }
+
   /* Tooltip */
   #tooltip {
     position: fixed; pointer-events: none; z-index: 10; display: none;
@@ -290,6 +299,21 @@
         <button type="submit" class="primary">Add habit</button>
       </form>
       <div id="manage-list"></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Reminders</h2>
+    <div class="card">
+      <div class="reminder-row">
+        <label for="reminder-enabled" class="reminder-toggle">
+          <input type="checkbox" id="reminder-enabled"> Daily reminder at
+        </label>
+        <input type="time" id="reminder-time" value="20:00" aria-label="Reminder time">
+      </div>
+      <div class="auth-msg" id="reminder-msg" aria-live="polite"></div>
+      <p class="hint">Reminders can only appear while the app is open in a tab or running as an
+      installed app. There's no push server, so a fully closed app can't be notified.</p>
     </div>
   </section>
 
@@ -996,6 +1020,91 @@
       if (!document.hidden && sbUser) syncNow().catch(() => {});
     });
   }
+
+  // ---------- reminders (device-local; no push server) ----------
+  const REMINDER_KEY = 'habit-tracker-reminder';
+  const reminderEnabled = document.getElementById('reminder-enabled');
+  const reminderTimeInput = document.getElementById('reminder-time');
+  const reminderMsg = document.getElementById('reminder-msg');
+  let reminder = (() => {
+    try {
+      const r = JSON.parse(store.getItem(REMINDER_KEY));
+      if (r && typeof r === 'object' && typeof r.time === 'string') return r;
+    } catch (e) { /* fall through */ }
+    return { enabled: false, time: '20:00', lastFired: '' };
+  })();
+  function saveReminder() { try { store.setItem(REMINDER_KEY, JSON.stringify(reminder)); } catch (e) { /* non-fatal */ } }
+  function nowHM() {
+    const d = new Date();
+    return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  }
+  // Don't fire for a time that had already passed when the reminder was (re)armed.
+  function armReminderForToday() { reminder.lastFired = nowHM() >= reminder.time ? dkey(today()) : ''; }
+
+  if (!('Notification' in window)) {
+    reminderEnabled.disabled = true;
+    reminderTimeInput.disabled = true;
+    reminderMsg.textContent = 'Notifications are not supported in this browser.';
+  } else {
+    reminderEnabled.checked = reminder.enabled && Notification.permission === 'granted';
+    reminderTimeInput.value = reminder.time;
+    reminderEnabled.addEventListener('change', async () => {
+      if (reminderEnabled.checked) {
+        reminderEnabled.checked = false; // stay off until permission actually resolves
+        const perm = await Notification.requestPermission();
+        if (perm !== 'granted') {
+          reminderMsg.textContent = perm === 'denied'
+            ? 'Notifications are blocked for this site — allow them in your browser settings to use reminders.'
+            : 'Notification permission was not granted.';
+          return;
+        }
+        reminderEnabled.checked = true;
+        reminder.enabled = true;
+        armReminderForToday();
+        reminderMsg.textContent = 'Reminder on — you’ll be notified at ' + reminder.time + ' if habits are still unchecked.';
+      } else {
+        reminder.enabled = false;
+        reminderMsg.textContent = 'Reminder off.';
+      }
+      saveReminder();
+    });
+    reminderTimeInput.addEventListener('change', () => {
+      reminder.time = reminderTimeInput.value || '20:00';
+      armReminderForToday();
+      saveReminder();
+      if (reminder.enabled) reminderMsg.textContent = 'Reminder time set to ' + reminder.time + '.';
+    });
+  }
+
+  function showReminderNotification(title, body) {
+    const opts = { body, icon: 'icons/icon-192.png', badge: 'icons/icon-192.png', tag: 'habit-daily-reminder' };
+    try {
+      new Notification(title, opts);
+    } catch (e) {
+      // Some platforms (Android Chrome) only allow notifications via the service worker
+      if (navigator.serviceWorker) {
+        navigator.serviceWorker.ready.then(r => r.showNotification(title, opts)).catch(() => {});
+      }
+    }
+  }
+
+  function checkReminder() {
+    if (!reminder.enabled || !('Notification' in window) || Notification.permission !== 'granted') return;
+    const todayKey = dkey(today());
+    if (reminder.lastFired === todayKey || nowHM() < reminder.time) return;
+    reminder.lastFired = todayKey;
+    saveReminder();
+    const habits = activeHabitsOn(todayKey);
+    const left = habits.filter(h => !isChecked(h.id, todayKey)).length;
+    if (left > 0) {
+      showReminderNotification(
+        left === 1 ? '1 habit left today' : left + ' habits left today',
+        'Open Habit Tracker to keep your streaks going.'
+      );
+    }
+  }
+  setInterval(checkReminder, 30000);
+  checkReminder();
 
   // ---------- PWA: offline app shell ----------
   if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
