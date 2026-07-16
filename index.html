@@ -273,9 +273,24 @@
   const STORE_KEY = 'habit-tracker-v1';
   const COLORS = ['c1','c2','c3','c4','c5','c6','c7','c8'];
 
+  // localStorage can be unavailable in sandboxed embeds; fall back to in-memory.
+  const store = (() => {
+    try {
+      const ls = window.localStorage;
+      ls.getItem(STORE_KEY);
+      return ls;
+    } catch (e) {
+      const mem = {};
+      return {
+        getItem: k => (k in mem ? mem[k] : null),
+        setItem: (k, v) => { mem[k] = String(v); },
+      };
+    }
+  })();
+
   function load() {
     try {
-      const raw = localStorage.getItem(STORE_KEY);
+      const raw = store.getItem(STORE_KEY);
       if (raw) {
         const data = JSON.parse(raw);
         if (data && Array.isArray(data.habits) && typeof data.checks === 'object') return data;
@@ -284,7 +299,7 @@
     return { habits: [], checks: {} };
   }
   let state = load();
-  function save() { localStorage.setItem(STORE_KEY, JSON.stringify(state)); }
+  function save() { try { store.setItem(STORE_KEY, JSON.stringify(state)); } catch (e) { /* quota/blocked: keep in-memory state */ } }
 
   // ---------- dates ----------
   const DAY_MS = 86400000;
@@ -619,14 +634,14 @@
 
   // theme toggle: cycles explicit light/dark, seeded from current effective scheme
   const THEME_KEY = 'habit-tracker-theme';
-  const savedTheme = localStorage.getItem(THEME_KEY);
+  const savedTheme = store.getItem(THEME_KEY);
   if (savedTheme === 'light' || savedTheme === 'dark') document.documentElement.dataset.theme = savedTheme;
   document.getElementById('theme-toggle').addEventListener('click', () => {
     const current = document.documentElement.dataset.theme ||
       (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
     const next = current === 'dark' ? 'light' : 'dark';
     document.documentElement.dataset.theme = next;
-    localStorage.setItem(THEME_KEY, next);
+    try { store.setItem(THEME_KEY, next); } catch (e) { /* non-fatal */ }
   });
 
   document.getElementById('today-label').textContent = fmtDay.format(today());
