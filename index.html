@@ -190,6 +190,16 @@
   .account-row .email { font-weight: 600; overflow-wrap: anywhere; }
   .account-row .meta { color: var(--text-muted); font-size: 0.8rem; }
 
+  /* Onboarding & hints */
+  .hint-card { display: flex; gap: 12px; align-items: flex-start; justify-content: space-between; margin-bottom: 24px; font-size: 0.88rem; color: var(--text-secondary); }
+  .hint-card[hidden] { display: none; }
+  .hint-card button { flex: none; }
+  .onboard { display: flex; flex-direction: column; gap: 8px; padding: 8px 4px; }
+  .onboard p { font-size: 0.92rem; }
+  .starter { display: flex; align-items: center; gap: 10px; cursor: pointer; padding: 4px 0; }
+  .starter-target { color: var(--text-muted); font-size: 0.8rem; }
+  .onboard button { align-self: flex-start; margin-top: 4px; }
+
   /* Reminders */
   .reminder-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
   .reminder-toggle { display: inline-flex; align-items: center; gap: 8px; font-weight: 500; cursor: pointer; }
@@ -233,6 +243,14 @@
   <div class="today-label" id="today-label"></div>
 
   <div class="tiles" id="tiles"></div>
+
+  <div class="card hint-card" id="hint-card" hidden>
+    <div><strong>How it works:</strong> check each habit off daily. 🔥 counts your
+    <strong>streak</strong> — consecutive days done (today doesn't break it until the
+    day is over). The <strong>Consistency</strong> heatmap colors each day by how many
+    of your habits you completed — darker means more done.</div>
+    <button id="hint-dismiss">Got it</button>
+  </div>
 
   <section id="auth-section" hidden>
     <h2>Sync across devices</h2>
@@ -513,13 +531,39 @@
     ).join('');
   }
 
+  const STARTERS = [
+    { name: 'Drink 8 glasses of water', target: 7 },
+    { name: 'Read 10 minutes', target: 7 },
+    { name: 'Exercise', target: 3 },
+    { name: 'Meditate', target: 5 },
+    { name: 'In bed by 11pm', target: 7 },
+  ];
+
   function renderToday() {
     const box = document.getElementById('today-list');
     const key = dkey(today());
     box.innerHTML = '';
     const habits = activeHabitsOn(key);
     if (!habits.length) {
-      box.innerHTML = '<div class="empty-note">No habits yet — add one below to get started.</div>';
+      if (state.habits.length) {
+        box.innerHTML = '<div class="empty-note">No habits yet — add one under Manage habits below.</div>';
+        return;
+      }
+      box.innerHTML =
+        '<div class="onboard">' +
+        '<p><strong>Welcome!</strong> Pick a few habits to start with — you can rename or remove them any time, or add your own under <em>Manage habits</em> below.</p>' +
+        STARTERS.map((s, i) =>
+          '<label class="starter"><input type="checkbox" value="' + i + '"' + (i < 2 ? ' checked' : '') + '> ' +
+          esc(s.name) + '<span class="starter-target">' + (s.target === 7 ? 'every day' : s.target + '×/week') + '</span></label>'
+        ).join('') +
+        '<button class="primary" id="onboard-add">Add selected habits</button>' +
+        '</div>';
+      document.getElementById('onboard-add').addEventListener('click', () => {
+        const picked = [...box.querySelectorAll('.starter input:checked')].map(cb => STARTERS[+cb.value]);
+        if (!picked.length) return;
+        for (const s of picked) addHabit(s.name, s.target);
+        render();
+      });
       return;
     }
     for (const h of habits) {
@@ -567,7 +611,7 @@
     table.appendChild(head);
 
     if (!state.habits.length) {
-      table.insertAdjacentHTML('beforeend', '<tr><td colspan="9" class="empty-note">No habits yet.</td></tr>');
+      table.insertAdjacentHTML('beforeend', '<tr><td colspan="9" class="empty-note">Your week appears here once you add habits.</td></tr>');
       return;
     }
 
@@ -702,22 +746,28 @@
   }
 
   // ---------- events ----------
+  function addHabit(name, target) {
+    const habit = {
+      id: 'h' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+      name: name.slice(0, 60),
+      color: COLORS[state.habits.length % COLORS.length],
+      target,
+      createdAt: dkey(today()),
+    };
+    state.habits.push(habit);
+    markHabitDirty(habit.id);
+    save();
+    return habit;
+  }
+
   document.getElementById('add-form').addEventListener('submit', e => {
     e.preventDefault();
     const input = document.getElementById('new-name');
     const name = input.value.trim();
     if (!name) return;
-    const habit = {
-      id: 'h' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-      name: name.slice(0, 60),
-      color: COLORS[state.habits.length % COLORS.length],
-      target: parseInt(document.getElementById('new-target').value, 10),
-      createdAt: dkey(today()),
-    };
-    state.habits.push(habit);
-    markHabitDirty(habit.id);
+    addHabit(name, parseInt(document.getElementById('new-target').value, 10));
     input.value = '';
-    save(); render();
+    render();
   });
 
   document.getElementById('week-prev').addEventListener('click', () => { weekOffset--; renderWeek(); });
@@ -1020,6 +1070,15 @@
       if (!document.hidden && sbUser) syncNow().catch(() => {});
     });
   }
+
+  // ---------- first-run explainer ----------
+  const HINT_KEY = 'habit-tracker-hint-dismissed';
+  const hintCard = document.getElementById('hint-card');
+  if (!store.getItem(HINT_KEY)) hintCard.hidden = false;
+  document.getElementById('hint-dismiss').addEventListener('click', () => {
+    hintCard.hidden = true;
+    try { store.setItem(HINT_KEY, '1'); } catch (e) { /* non-fatal */ }
+  });
 
   // ---------- reminders (device-local; no push server) ----------
   const REMINDER_KEY = 'habit-tracker-reminder';
