@@ -169,6 +169,14 @@
   .manage-row .name { flex: 1; font-weight: 500; }
   .manage-row .meta { color: var(--text-muted); font-size: 0.8rem; white-space: nowrap; }
   .manage-row button.danger { color: var(--danger); }
+  .manage-row[draggable="true"] { cursor: grab; }
+  .manage-row.dragging { opacity: 0.5; }
+  .manage-row.drop-above { box-shadow: 0 -2px 0 var(--accent); }
+  .drag-handle { color: var(--text-muted); font-size: 0.9rem; cursor: grab; user-select: none; }
+  .order-btns { display: flex; gap: 2px; }
+  .order-btns button { padding: 2px 8px; font-size: 0.8rem; }
+  .note-btn { border: none; background: transparent; color: var(--text-muted); font-size: 1.05rem; padding: 4px 6px; cursor: pointer; }
+  .note-btn.has-note { color: var(--accent); }
 
   /* Sync / auth */
   .pill { display: inline-flex; align-items: center; gap: 6px; font-size: 0.82rem; border-radius: 999px; padding: 6px 12px; max-width: 240px; }
@@ -412,6 +420,11 @@
     return ensureMeta({ habits: [], checks: {} });
   }
   let state = load();
+  function normalizeOrder() {
+    state.habits.forEach((h, i) => { if (typeof h.sort !== 'number') h.sort = i; });
+    state.habits.sort((a, b) => a.sort - b.sort);
+  }
+  normalizeOrder();
   function save() {
     try { store.setItem(STORE_KEY, JSON.stringify(state)); } catch (e) { /* quota/blocked: keep in-memory state */ }
     scheduleSync();
@@ -459,13 +472,26 @@
   const fmtShort = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' });
 
   // ---------- model helpers ----------
-  function isChecked(habitId, key) { return !!(state.checks[habitId] && state.checks[habitId][key]); }
-  function setChecked(habitId, key, on) {
+  // A check value is either `true` (done, no note) or `{ done, note }` —
+  // both shapes import/export cleanly, so old backups stay compatible.
+  function checkVal(habitId, key) { return state.checks[habitId] ? state.checks[habitId][key] : undefined; }
+  function isChecked(habitId, key) {
+    const v = checkVal(habitId, key);
+    return v === true || !!(v && v.done);
+  }
+  function getNote(habitId, key) {
+    const v = checkVal(habitId, key);
+    return (v && typeof v === 'object' && v.note) || '';
+  }
+  function setCheckEntry(habitId, key, done, note) {
     if (!state.checks[habitId]) state.checks[habitId] = {};
-    if (on) state.checks[habitId][key] = true; else delete state.checks[habitId][key];
+    if (note) state.checks[habitId][key] = { done: !!done, note };
+    else if (done) state.checks[habitId][key] = true;
+    else delete state.checks[habitId][key];
     markCheckDirty(habitId, key);
     save();
   }
+  function setChecked(habitId, key, on) { setCheckEntry(habitId, key, on, getNote(habitId, key)); }
   function habitStart(h) {
     // Backfilled checks before the creation date extend the habit's active range.
     let start = h.createdAt;
@@ -485,7 +511,7 @@
     return n;
   }
   function bestStreak(habit) {
-    const keys = Object.keys(state.checks[habit.id] || {}).sort();
+    const keys = Object.keys(state.checks[habit.id] || {}).filter(k => isChecked(habit.id, k)).sort();
     let best = 0, run = 0, prev = null;
     for (const k of keys) {
       const t = new Date(k + 'T00:00:00').getTime();
@@ -596,6 +622,19 @@
         `<span class="habit-dot" style="background:var(--${h.color})"></span>` +
         `<span class="name">${esc(h.name)}</span>` +
         `<span class="streak">${streak ? '🔥 ' + streak + (streak === 1 ? ' day' : ' days') : ''}</span>`;
+      const note = getNote(h.id, key);
+      const noteBtn = document.createElement('button');
+      noteBtn.className = 'note-btn' + (note ? ' has-note' : '');
+      noteBtn.textContent = '✎';
+      noteBtn.title = note ? 'Note: ' + note : 'Add a note for today';
+      noteBtn.setAttribute('aria-label', (note ? 'Edit note for ' : 'Add note for ') + h.name);
+      noteBtn.addEventListener('click', () => {
+        const t = prompt('Note for "' + h.name + '" today (e.g. why you missed it):', note);
+        if (t === null) return;
+        setCheckEntry(h.id, key, isChecked(h.id, key), t.trim().slice(0, 200));
+        render();
+      });
+      row.appendChild(noteBtn);
       const btn = document.createElement('button');
       btn.className = 'check-btn' + (done ? ' done' : '');
       btn.textContent = '✓';
@@ -729,6 +768,36 @@
     }
   }
 
+  // ---------- reordering ----------
+  let dragId = null;
+  function reindexHabits() {
+    const changed = [];
+    state.habits.forEach((h, i) => { if (h.sort !== i) { h.sort = i; changed.push(h.id); } });
+    for (const id of changed) markHabitDirty(id);
+    if (changed.length) save();
+    render();
+  }
+  function moveHabitBefore(movedId, targetId) {
+    const from = state.habits.findIndex(h => h.id === movedId);
+    if (from < 0) return;
+    const [item] = state.habits.splice(from, 1);
+    const to = state.habits.findIndex(h => h.id === targetId);
+    state.habits.splice(to < 0 ? state.habits.length : to, 0, item);
+    reindexHabits();
+  }
+  function nudgeHabit(h, dir) {
+    const act = activeHabits();
+    const swapWith = act[act.indexOf(h) + dir];
+    if (!swapWith) return;
+    const i = state.habits.indexOf(h), j = state.habits.indexOf(swapWith);
+    state.habits[i] = swapWith;
+    state.habits[j] = h;
+    reindexHabits();
+  }
+  function clearDropCues() {
+    document.querySelectorAll('.manage-row.drop-above').forEach(el => el.classList.remove('drop-above'));
+  }
+
   function setArchived(h, archived) {
     h.archived = archived;
     markHabitDirty(h.id);
@@ -763,10 +832,39 @@
     for (const h of activeHabits()) {
       const row = document.createElement('div');
       row.className = 'manage-row';
+      row.draggable = true;
       row.innerHTML =
+        `<span class="drag-handle" aria-hidden="true">⠿</span>` +
         `<span class="habit-dot" style="background:var(--${h.color})"></span>` +
         `<span class="name">${esc(h.name)}</span>` +
         `<span class="meta">goal ${h.target}×/wk · best streak ${bestStreak(h)}d · since ${h.createdAt}</span>`;
+      row.addEventListener('dragstart', e => {
+        dragId = h.id;
+        row.classList.add('dragging');
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', h.id);
+      });
+      row.addEventListener('dragend', () => { dragId = null; row.classList.remove('dragging'); clearDropCues(); });
+      row.addEventListener('dragover', e => {
+        if (dragId && dragId !== h.id) { e.preventDefault(); clearDropCues(); row.classList.add('drop-above'); }
+      });
+      row.addEventListener('drop', e => {
+        e.preventDefault();
+        if (dragId && dragId !== h.id) moveHabitBefore(dragId, h.id);
+      });
+      const orderBtns = document.createElement('span');
+      orderBtns.className = 'order-btns';
+      const up = document.createElement('button');
+      up.textContent = '↑';
+      up.setAttribute('aria-label', 'Move ' + h.name + ' up');
+      up.addEventListener('click', () => nudgeHabit(h, -1));
+      const down = document.createElement('button');
+      down.textContent = '↓';
+      down.setAttribute('aria-label', 'Move ' + h.name + ' down');
+      down.addEventListener('click', () => nudgeHabit(h, 1));
+      orderBtns.appendChild(up);
+      orderBtns.appendChild(down);
+      row.appendChild(orderBtns);
       const rename = document.createElement('button');
       rename.textContent = 'Rename';
       rename.addEventListener('click', () => {
@@ -849,6 +947,7 @@
       color: COLORS[state.habits.length % COLORS.length],
       target,
       createdAt: dkey(today()),
+      sort: state.habits.reduce((m, x) => Math.max(m, (x.sort || 0) + 1), 0),
     };
     state.habits.push(habit);
     markHabitDirty(habit.id);
@@ -885,6 +984,7 @@
       const data = JSON.parse(text);
       if (!data || !Array.isArray(data.habits) || typeof data.checks !== 'object') throw new Error('bad shape');
       state = ensureMeta(data);
+      normalizeOrder();
       markAllDirty();
       save(); render();
     }).catch(() => alert('Could not import: not a valid Habit Tracker export.'));
@@ -961,8 +1061,8 @@
         const ts = (h ? m.habitTs[id] : m.habitDeleted[id]) || Date.now();
         pushedTs[id] = ts;
         return h
-          ? { user_id: sbUser.id, id, name: h.name, color: h.color, target: h.target, created_day: h.createdAt, archived: !!h.archived, deleted: false, updated_ms: ts }
-          : { user_id: sbUser.id, id, name: '', color: 'c1', target: 7, created_day: '', archived: false, deleted: true, updated_ms: ts };
+          ? { user_id: sbUser.id, id, name: h.name, color: h.color, target: h.target, created_day: h.createdAt, archived: !!h.archived, sort: typeof h.sort === 'number' ? h.sort : 0, deleted: false, updated_ms: ts }
+          : { user_id: sbUser.id, id, name: '', color: 'c1', target: 7, created_day: '', archived: false, sort: 0, deleted: true, updated_ms: ts };
       });
       const { error } = await sb.from('habits').upsert(rows);
       if (error) throw error;
@@ -977,7 +1077,7 @@
         const habitId = k.slice(0, sep), day = k.slice(sep + 1);
         const ts = (m.checkTs[habitId] && m.checkTs[habitId][day]) || Date.now();
         pushedTs[k] = ts;
-        return { user_id: sbUser.id, habit_id: habitId, day, done: isChecked(habitId, day), updated_ms: ts };
+        return { user_id: sbUser.id, habit_id: habitId, day, done: isChecked(habitId, day), note: getNote(habitId, day) || null, updated_ms: ts };
       });
       const { error } = await sb.from('checks').upsert(rows);
       if (error) throw error;
@@ -1008,8 +1108,10 @@
     if (!h) { h = { id: r.id }; state.habits.push(h); }
     h.name = r.name; h.color = r.color; h.target = r.target; h.createdAt = r.created_day;
     h.archived = !!r.archived;
+    if (typeof r.sort === 'number') h.sort = r.sort;
     m.habitTs[r.id] = r.updated_ms;
     delete m.habitDeleted[r.id];
+    normalizeOrder();
     return true;
   }
 
@@ -1020,13 +1122,15 @@
     if (r.updated_ms <= localTs) return false;
     delete m.dirty.checks[r.habit_id + '|' + r.day];
     (m.checkTs[r.habit_id] = m.checkTs[r.habit_id] || {})[r.day] = r.updated_ms;
-    const had = isChecked(r.habit_id, r.day);
-    if (r.done) {
+    const before = JSON.stringify(checkVal(r.habit_id, r.day));
+    if (r.note) {
+      (state.checks[r.habit_id] = state.checks[r.habit_id] || {})[r.day] = { done: !!r.done, note: r.note };
+    } else if (r.done) {
       (state.checks[r.habit_id] = state.checks[r.habit_id] || {})[r.day] = true;
     } else if (state.checks[r.habit_id]) {
       delete state.checks[r.habit_id][r.day];
     }
-    return had !== r.done;
+    return before !== JSON.stringify(checkVal(r.habit_id, r.day));
   }
 
   async function pullChanges() {

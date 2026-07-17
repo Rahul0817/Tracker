@@ -9,6 +9,7 @@ create table if not exists public.habits (
   target      int     not null,
   created_day text    not null,
   archived    boolean not null default false, -- soft-delete: hidden from views, history kept
+  sort        int     not null default 0,     -- display order
   deleted     boolean not null default false, -- tombstone so deletes propagate across devices
   updated_ms  bigint  not null,               -- client clock, ms; last-write-wins key
   primary key (user_id, id)
@@ -19,6 +20,7 @@ create table if not exists public.checks (
   habit_id   text    not null,
   day        text    not null,               -- 'YYYY-MM-DD'
   done       boolean not null,
+  note       text,                           -- optional per-day note
   updated_ms bigint  not null,
   primary key (user_id, habit_id, day)
 );
@@ -41,3 +43,5 @@ create index if not exists checks_updated_idx on public.checks (user_id, updated
 
 -- Already ran an earlier version of this schema? Apply just the additions:
 -- alter table public.habits add column if not exists archived boolean not null default false;
+-- alter table public.habits add column if not exists sort int not null default 0;
+-- alter table public.checks add column if not exists note text;
