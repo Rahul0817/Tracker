@@ -1,7 +1,7 @@
 # Habit Tracker
 
-A self-contained, single-file habit tracking web app. Open `index.html` in any
-modern browser — no build step, no server, no dependencies.
+A local-first habit tracking web app with optional cloud sync. The app itself
+is a single `index.html` — no build step, no bundled dependencies.
 
 ## Features
 
@@ -24,6 +24,17 @@ modern browser — no build step, no server, no dependencies.
   a backend endpoint — flagged as future work.)
 - **Local & portable data** — everything is stored in `localStorage`;
   export/import as JSON from the footer.
+- **Onboarding** — first launch offers starter habits and a dismissible
+  explainer of streaks and the heatmap.
+- **Archive, don't lose** — "deleting" a habit archives it (history kept,
+  restorable); permanent deletion is a separate, clearly-labeled action.
+  Both offer a 5-second Undo toast.
+- **Reorder & notes** — drag habits (or use ↑/↓ buttons) to reorder;
+  attach a short note to any day (e.g. why you missed it).
+- **Milestones & sharing** — 7/30/100/365-day streaks get a small
+  celebration; "Share my streak" renders a PNG card for social media.
+- **Accessible** — non-color cues on all states, keyboard operable,
+  labeled charts, `prefers-reduced-motion` respected.
 
 ## Usage
 
@@ -73,3 +84,29 @@ How sync behaves:
 The Supabase JS client loads on demand from a CDN only when sync is
 configured — the app itself still has zero build steps and no bundled
 dependencies.
+
+## Running locally
+
+```sh
+npx http-server .        # then open http://localhost:8080
+```
+
+Opening `index.html` directly from disk also works for everything except
+service-worker/PWA install and magic-link sign-in, which need an HTTP(S)
+origin. For production, any static host works (GitHub Pages, Netlify, …);
+HTTPS is required for install prompts and notifications.
+
+## What's still manual
+
+- **Supabase project** — create it, run `supabase/schema.sql`, and fill in
+  `supabase-config.js` (see above). Without it the app is local-only.
+- **Push notifications** — reminders currently fire only while the app is
+  open. True push (closed-app delivery) needs a service-worker push
+  subscription, VAPID keys, and a backend endpoint that sends pushes on a
+  schedule — deliberately not built yet; ask before scoping it.
+- **Icon polish** — `icons/` contains generated placeholder icons (blue
+  checkmark). Swap in branded artwork at the same sizes if you have it.
+- **Localization** — all UI text is hard-coded English.
+- **Smarter conflict merge** — sync uses per-record last-write-wins on
+  client clocks; `applyRemoteHabit`/`applyRemoteCheck` in `index.html` are
+  the two functions to replace with a field-level or CRDT merge later.

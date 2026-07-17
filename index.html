@@ -62,6 +62,12 @@
   }
 
   * { margin: 0; padding: 0; box-sizing: border-box; }
+  button:focus-visible, input:focus-visible, select:focus-visible, [draggable="true"]:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 2px;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: 0.001s !important; transition-duration: 0.001s !important; }
+  }
   body {
     font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
     background: var(--page);
@@ -125,7 +131,7 @@
   table.week th, table.week td { text-align: center; padding: 6px 4px; font-size: 0.82rem; }
   table.week th { color: var(--text-muted); font-weight: 500; }
   table.week th.today-col, table.week td.today-col { background: color-mix(in srgb, var(--accent) 7%, transparent); }
-  table.week td.habit-name { text-align: left; font-weight: 500; font-size: 0.9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 180px; }
+  table.week .habit-name { text-align: left; font-weight: 500; font-size: 0.9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 180px; padding: 6px 4px; }
   .day-toggle {
     width: 26px; height: 26px; border-radius: 6px; border: 1.5px solid var(--baseline);
     background: transparent; padding: 0; font-size: 0.8rem; color: transparent;
@@ -222,6 +228,16 @@
     position: fixed; pointer-events: none; z-index: 10; display: none;
     background: var(--text-primary); color: var(--page);
     font-size: 0.78rem; padding: 5px 9px; border-radius: 6px; white-space: nowrap;
+  }
+
+  /* Confetti (milestones) */
+  .confetti {
+    position: fixed; top: -16px; width: 8px; height: 14px; border-radius: 2px;
+    z-index: 30; pointer-events: none;
+    animation: confetti-fall 2.4s ease-in forwards;
+  }
+  @keyframes confetti-fall {
+    to { transform: translateY(105vh) rotate(720deg); opacity: 0.85; }
   }
 
   /* Toast */
@@ -360,6 +376,7 @@
   </section>
 
   <footer>
+    <button id="share-btn">Share my streak</button>
     <button id="export-btn">Export data</button>
     <button id="import-btn">Import data</button>
     <input type="file" id="import-file" accept="application/json" hidden>
@@ -640,7 +657,11 @@
       btn.textContent = '✓';
       btn.setAttribute('aria-label', (done ? 'Mark not done: ' : 'Mark done: ') + h.name);
       btn.setAttribute('aria-pressed', String(done));
-      btn.addEventListener('click', () => { setChecked(h.id, key, !done); render(); });
+      btn.addEventListener('click', () => {
+        setChecked(h.id, key, !done);
+        if (!done) maybeCelebrate(h);
+        render();
+      });
       row.appendChild(btn);
       box.appendChild(row);
     }
@@ -657,17 +678,18 @@
     table.innerHTML = '';
 
     const head = document.createElement('tr');
-    head.innerHTML = '<th style="text-align:left">Habit</th>';
+    head.innerHTML = '<th scope="col" style="text-align:left">Habit</th>';
     const days = [];
     for (let i = 0; i < 7; i++) {
       const d = addDays(start, i);
       days.push(d);
       const th = document.createElement('th');
+      th.setAttribute('scope', 'col');
       th.innerHTML = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][i] + '<br>' + d.getDate();
       if (dkey(d) === todayKey) th.classList.add('today-col');
       head.appendChild(th);
     }
-    head.insertAdjacentHTML('beforeend', '<th>Week</th>');
+    head.insertAdjacentHTML('beforeend', '<th scope="col">Week</th>');
     table.appendChild(head);
 
     if (!activeHabits().length) {
@@ -677,7 +699,8 @@
 
     for (const h of activeHabits()) {
       const tr = document.createElement('tr');
-      const nameTd = document.createElement('td');
+      const nameTd = document.createElement('th');
+      nameTd.setAttribute('scope', 'row');
       nameTd.className = 'habit-name';
       nameTd.textContent = h.name;
       tr.appendChild(nameTd);
@@ -694,13 +717,18 @@
         btn.style.setProperty('--habit-color', `var(--${h.color})`);
         btn.textContent = done ? '✓' : '';
         btn.disabled = future;
+        btn.setAttribute('aria-pressed', String(done));
         btn.setAttribute('aria-label', `${h.name} on ${key}: ${done ? 'done' : 'not done'}`);
-        if (!future) btn.addEventListener('click', () => { setChecked(h.id, key, !done); render(); });
+        if (!future) btn.addEventListener('click', () => {
+          setChecked(h.id, key, !done);
+          if (!done) maybeCelebrate(h);
+          render();
+        });
         td.appendChild(btn);
         tr.appendChild(td);
       }
       const met = count >= h.target;
-      tr.insertAdjacentHTML('beforeend', `<td class="week-count${met ? ' met' : ''}">${count}/${h.target}</td>`);
+      tr.insertAdjacentHTML('beforeend', `<td class="week-count${met ? ' met' : ''}">${count}/${h.target}${met ? ' ✓' : ''}</td>`);
       table.appendChild(tr);
     }
   }
@@ -726,9 +754,13 @@
           }
           const habits = activeHabitsOn(dkey(d));
           const done = habits.filter(h => isChecked(h.id, dkey(d))).length;
-          bindTooltip(cell, `${fmtShort.format(d)}: ${done}/${habits.length || 0} done`);
+          const label = `${fmtShort.format(d)}: ${done}/${habits.length || 0} done`;
+          cell.setAttribute('role', 'img');
+          cell.setAttribute('aria-label', label);
+          bindTooltip(cell, label);
         } else {
           cell.style.opacity = '0.35';
+          cell.setAttribute('aria-hidden', 'true');
         }
         col.appendChild(cell);
       }
@@ -759,7 +791,10 @@
       const bar = document.createElement('div');
       bar.className = 'bar';
       bar.style.height = Math.max(2, pct) + '%';
-      bindTooltip(bar, `Week of ${fmtShort.format(start)}: ${pct}% (${done}/${total})`);
+      const barLabel = `Week of ${fmtShort.format(start)}: ${pct}% (${done}/${total})`;
+      bar.setAttribute('role', 'img');
+      bar.setAttribute('aria-label', barLabel);
+      bindTooltip(bar, barLabel);
       slot.appendChild(bar);
       chart.appendChild(slot);
       const lbl = document.createElement('span');
@@ -914,6 +949,83 @@
       }
     }
   }
+
+  // ---------- streak milestones ----------
+  const MILESTONES = [7, 30, 100, 365];
+  const MILESTONE_KEY = 'habit-tracker-milestones';
+  let celebrated = (() => {
+    try { const c = JSON.parse(store.getItem(MILESTONE_KEY)); if (c && typeof c === 'object') return c; } catch (e) { /* fresh */ }
+    return {};
+  })();
+  function maybeCelebrate(h) {
+    const s = currentStreak(h);
+    if (!MILESTONES.includes(s)) return;
+    celebrated[h.id] = celebrated[h.id] || {};
+    if (celebrated[h.id][s]) return;
+    celebrated[h.id][s] = true;
+    try { store.setItem(MILESTONE_KEY, JSON.stringify(celebrated)); } catch (e) { /* non-fatal */ }
+    showToast(`🎉 ${s}-day streak on "${h.name}" — keep it going!`);
+    confettiBurst();
+  }
+  function confettiBurst() {
+    if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    for (let i = 0; i < 32; i++) {
+      const p = document.createElement('div');
+      p.className = 'confetti';
+      p.style.left = Math.random() * 100 + 'vw';
+      p.style.background = `var(--${COLORS[i % COLORS.length]})`;
+      p.style.animationDelay = Math.random() * 0.4 + 's';
+      p.style.animationDuration = 2 + Math.random() + 's';
+      document.body.appendChild(p);
+      setTimeout(() => p.remove(), 3600);
+    }
+  }
+
+  // ---------- share card ----------
+  function trunc(s, n) { return s.length > n ? s.slice(0, n - 1) + '…' : s; }
+  function shareStreakCard() {
+    const tops = activeHabits()
+      .map(h => ({ name: h.name, streak: currentStreak(h) }))
+      .sort((a, b) => b.streak - a.streak)
+      .slice(0, 4);
+    if (!tops.length) { showToast('Add a habit first — then share your streaks.'); return; }
+    const W = 1000, H = 525;
+    const cv = document.createElement('canvas');
+    cv.width = W; cv.height = H;
+    const ctx = cv.getContext('2d');
+    const g = ctx.createLinearGradient(0, 0, W, H);
+    g.addColorStop(0, '#3987e5');
+    g.addColorStop(1, '#123c70');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.font = '600 28px system-ui, sans-serif';
+    ctx.fillText('Habit Tracker', 60, 84);
+    const top = tops[0];
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '700 84px system-ui, sans-serif';
+    ctx.fillText(`🔥 ${top.streak}-day streak`, 60, 204);
+    ctx.font = '500 40px system-ui, sans-serif';
+    ctx.fillText(trunc(top.name, 40), 60, 264);
+    ctx.font = '400 30px system-ui, sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,0.9)';
+    tops.slice(1).forEach((h, i) => ctx.fillText(`🔥 ${h.streak} · ${trunc(h.name, 44)}`, 60, 344 + i * 46));
+    ctx.font = '400 24px system-ui, sans-serif';
+    ctx.fillStyle = 'rgba(255,255,255,0.7)';
+    ctx.fillText(fmtDay.format(today()), 60, H - 46);
+    cv.toBlob(async blob => {
+      const file = new File([blob], 'my-streaks.png', { type: 'image/png' });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        try { await navigator.share({ files: [file], title: 'My habit streaks' }); return; } catch (e) { /* cancelled or unsupported: download instead */ }
+      }
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'my-streaks.png';
+      a.click();
+      URL.revokeObjectURL(a.href);
+    });
+  }
+  document.getElementById('share-btn').addEventListener('click', shareStreakCard);
 
   // ---------- undo toast ----------
   const toastEl = document.getElementById('toast');
