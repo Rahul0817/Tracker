@@ -216,6 +216,22 @@
     font-size: 0.78rem; padding: 5px 9px; border-radius: 6px; white-space: nowrap;
   }
 
+  /* Toast */
+  #toast {
+    position: fixed; left: 50%; transform: translateX(-50%); bottom: 24px; z-index: 20;
+    display: flex; gap: 14px; align-items: center;
+    background: var(--text-primary); color: var(--page);
+    padding: 10px 16px; border-radius: 10px; font-size: 0.88rem;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25); max-width: min(90vw, 480px);
+  }
+  #toast[hidden] { display: none; }
+  #toast button {
+    background: transparent; border: none; color: inherit; font-weight: 700;
+    padding: 2px 4px; text-decoration: underline; cursor: pointer;
+  }
+  .archived-head { margin-top: 18px; padding-top: 10px; border-top: 1px solid var(--grid); font-size: 0.82rem; color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+  .manage-row.archived .name { color: var(--text-muted); }
+
   footer { color: var(--text-muted); font-size: 0.78rem; margin-top: 40px; display: flex; gap: 12px; flex-wrap: wrap; }
   footer button { font-size: 0.78rem; padding: 4px 10px; }
 </style>
@@ -343,6 +359,10 @@
   </footer>
 </div>
 <div id="tooltip" role="tooltip"></div>
+<div id="toast" role="status" aria-live="polite" hidden>
+  <span id="toast-text"></span>
+  <button id="toast-action">Undo</button>
+</div>
 
 <script src="supabase-config.js"></script>
 <script>
@@ -452,8 +472,9 @@
     for (const k in (state.checks[h.id] || {})) if (k < start) start = k;
     return start;
   }
+  function activeHabits() { return state.habits.filter(h => !h.archived); }
   function activeHabitsOn(dateKey) {
-    return state.habits.filter(h => habitStart(h) <= dateKey);
+    return activeHabits().filter(h => habitStart(h) <= dateKey);
   }
   function currentStreak(habit) {
     // Consecutive checked days ending today (or yesterday, so today doesn't break it before it's done).
@@ -518,13 +539,13 @@
       last7 += hs.filter(h => isChecked(h.id, dkey(d))).length;
     }
     const rate7 = denom7 ? Math.round(100 * last7 / denom7) : 0;
-    const topStreak = state.habits.reduce((m, h) => Math.max(m, currentStreak(h)), 0);
+    const topStreak = activeHabits().reduce((m, h) => Math.max(m, currentStreak(h)), 0);
 
     const tiles = [
       { label: 'Today', value: habits.length ? `${doneToday}/${habits.length}` : '—', sub: habits.length && doneToday === habits.length ? 'All done ✓' : 'habits completed', up: habits.length > 0 && doneToday === habits.length },
       { label: 'Last 7 days', value: rate7 + '%', sub: 'completion rate' },
       { label: 'Longest active streak', value: topStreak, sub: topStreak === 1 ? 'day' : 'days' },
-      { label: 'Habits', value: state.habits.length, sub: 'being tracked' },
+      { label: 'Habits', value: activeHabits().length, sub: 'being tracked' },
     ];
     document.getElementById('tiles').innerHTML = tiles.map(x =>
       `<div class="tile"><div class="label">${x.label}</div><div class="value">${x.value}</div><div class="sub${x.up ? ' up' : ''}">${x.sub}</div></div>`
@@ -546,7 +567,7 @@
     const habits = activeHabitsOn(key);
     if (!habits.length) {
       if (state.habits.length) {
-        box.innerHTML = '<div class="empty-note">No habits yet — add one under Manage habits below.</div>';
+        box.innerHTML = '<div class="empty-note">No active habits — add one under Manage habits below, or restore an archived habit.</div>';
         return;
       }
       box.innerHTML =
@@ -610,12 +631,12 @@
     head.insertAdjacentHTML('beforeend', '<th>Week</th>');
     table.appendChild(head);
 
-    if (!state.habits.length) {
+    if (!activeHabits().length) {
       table.insertAdjacentHTML('beforeend', '<tr><td colspan="9" class="empty-note">Your week appears here once you add habits.</td></tr>');
       return;
     }
 
-    for (const h of state.habits) {
+    for (const h of activeHabits()) {
       const tr = document.createElement('tr');
       const nameTd = document.createElement('td');
       nameTd.className = 'habit-name';
@@ -708,10 +729,38 @@
     }
   }
 
+  function setArchived(h, archived) {
+    h.archived = archived;
+    markHabitDirty(h.id);
+    save(); render();
+  }
+
+  function permanentlyDelete(h) {
+    // Snapshot everything the undo needs before the tombstone wipes it.
+    const snapshot = {
+      habit: { ...h },
+      checks: state.checks[h.id],
+      checkTs: state.meta.checkTs[h.id],
+    };
+    state.habits = state.habits.filter(x => x.id !== h.id);
+    delete state.checks[h.id];
+    markHabitDeleted(h.id);
+    save(); render();
+    showToast(`Deleted "${h.name}" and its history`, () => {
+      state.habits.push(snapshot.habit);
+      if (snapshot.checks) state.checks[snapshot.habit.id] = snapshot.checks;
+      if (snapshot.checkTs) state.meta.checkTs[snapshot.habit.id] = snapshot.checkTs;
+      delete state.meta.habitDeleted[snapshot.habit.id];
+      markHabitDirty(snapshot.habit.id);
+      for (const day in (snapshot.checks || {})) markCheckDirty(snapshot.habit.id, day);
+      save(); render();
+    });
+  }
+
   function renderManage() {
     const box = document.getElementById('manage-list');
     box.innerHTML = '';
-    for (const h of state.habits) {
+    for (const h of activeHabits()) {
       const row = document.createElement('div');
       row.className = 'manage-row';
       row.innerHTML =
@@ -724,22 +773,69 @@
         const name = prompt('Rename habit:', h.name);
         if (name && name.trim()) { h.name = name.trim().slice(0, 60); markHabitDirty(h.id); save(); render(); }
       });
-      const del = document.createElement('button');
-      del.className = 'danger';
-      del.textContent = 'Delete';
-      del.addEventListener('click', () => {
-        if (confirm(`Delete "${h.name}" and all its history?`)) {
-          state.habits = state.habits.filter(x => x.id !== h.id);
-          delete state.checks[h.id];
-          markHabitDeleted(h.id);
-          save(); render();
-        }
+      const arch = document.createElement('button');
+      arch.textContent = 'Archive';
+      arch.addEventListener('click', () => {
+        setArchived(h, true);
+        showToast(`Archived "${h.name}" — history kept`, () => setArchived(h, false));
       });
       row.appendChild(rename);
-      row.appendChild(del);
+      row.appendChild(arch);
       box.appendChild(row);
     }
+    const archived = state.habits.filter(h => h.archived);
+    if (archived.length) {
+      const head = document.createElement('div');
+      head.className = 'archived-head';
+      head.textContent = 'Archived habits';
+      box.appendChild(head);
+      for (const h of archived) {
+        const row = document.createElement('div');
+        row.className = 'manage-row archived';
+        row.innerHTML =
+          `<span class="habit-dot" style="background:var(--${h.color})"></span>` +
+          `<span class="name">${esc(h.name)}</span>` +
+          `<span class="meta">best streak ${bestStreak(h)}d · history kept</span>`;
+        const restore = document.createElement('button');
+        restore.textContent = 'Restore';
+        restore.addEventListener('click', () => {
+          setArchived(h, false);
+          showToast(`Restored "${h.name}"`);
+        });
+        const del = document.createElement('button');
+        del.className = 'danger';
+        del.textContent = 'Permanently delete';
+        del.addEventListener('click', () => {
+          if (confirm(`Permanently delete "${h.name}" and all its history? Undo is only available for a few seconds afterwards.`)) {
+            permanentlyDelete(h);
+          }
+        });
+        row.appendChild(restore);
+        row.appendChild(del);
+        box.appendChild(row);
+      }
+    }
   }
+
+  // ---------- undo toast ----------
+  const toastEl = document.getElementById('toast');
+  const toastText = document.getElementById('toast-text');
+  const toastAction = document.getElementById('toast-action');
+  let toastTimer = null, toastUndo = null;
+  function showToast(text, undoFn) {
+    toastText.textContent = text;
+    toastUndo = undoFn || null;
+    toastAction.hidden = !undoFn;
+    toastEl.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(hideToast, 5000);
+  }
+  function hideToast() { toastEl.hidden = true; toastUndo = null; }
+  toastAction.addEventListener('click', () => {
+    const undo = toastUndo;
+    hideToast();
+    if (undo) undo();
+  });
 
   function esc(s) {
     return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -865,8 +961,8 @@
         const ts = (h ? m.habitTs[id] : m.habitDeleted[id]) || Date.now();
         pushedTs[id] = ts;
         return h
-          ? { user_id: sbUser.id, id, name: h.name, color: h.color, target: h.target, created_day: h.createdAt, deleted: false, updated_ms: ts }
-          : { user_id: sbUser.id, id, name: '', color: 'c1', target: 7, created_day: '', deleted: true, updated_ms: ts };
+          ? { user_id: sbUser.id, id, name: h.name, color: h.color, target: h.target, created_day: h.createdAt, archived: !!h.archived, deleted: false, updated_ms: ts }
+          : { user_id: sbUser.id, id, name: '', color: 'c1', target: 7, created_day: '', archived: false, deleted: true, updated_ms: ts };
       });
       const { error } = await sb.from('habits').upsert(rows);
       if (error) throw error;
@@ -911,6 +1007,7 @@
     let h = state.habits.find(x => x.id === r.id);
     if (!h) { h = { id: r.id }; state.habits.push(h); }
     h.name = r.name; h.color = r.color; h.target = r.target; h.createdAt = r.created_day;
+    h.archived = !!r.archived;
     m.habitTs[r.id] = r.updated_ms;
     delete m.habitDeleted[r.id];
     return true;

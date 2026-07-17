@@ -8,6 +8,7 @@ create table if not exists public.habits (
   color       text    not null,
   target      int     not null,
   created_day text    not null,
+  archived    boolean not null default false, -- soft-delete: hidden from views, history kept
   deleted     boolean not null default false, -- tombstone so deletes propagate across devices
   updated_ms  bigint  not null,               -- client clock, ms; last-write-wins key
   primary key (user_id, id)
@@ -37,3 +38,6 @@ alter publication supabase_realtime add table public.checks;
 
 create index if not exists habits_updated_idx on public.habits (user_id, updated_ms);
 create index if not exists checks_updated_idx on public.checks (user_id, updated_ms);
+
+-- Already ran an earlier version of this schema? Apply just the additions:
+-- alter table public.habits add column if not exists archived boolean not null default false;
